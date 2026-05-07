@@ -13,6 +13,7 @@ const FIELD_ALIASES = {
   continuity: ['continuity'] as const,
   confidence: ['confidence'] as const,
   is_distracted: ['is_distracted', 'isDistracted', 'distracted'] as const,
+  category: ['category', 'categoryName', 'カテゴリ'] as const,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -160,6 +161,9 @@ function normalizeContinuityValue(value: unknown): 'continue' | 'switch' | 'uncl
   if (!text) {
     return undefined;
   }
+  if (text.includes('yes') || text.includes('same') || text.includes('継続')) {
+    return 'continue';
+  }
   if (text.includes('continue') || text.includes('継続')) {
     return 'continue';
   }
@@ -215,15 +219,67 @@ export function extractJsonBlock(content: string): string {
   return trimmed.slice(start, end + 1);
 }
 
+function stripCodeFences(content: string): string {
+  const m = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+  return m ? m[1]!.trim() : content;
+}
+
+/** Best-effort repair when the model truncates mid-JSON (common with large vision payloads). */
+function lenientJsonParseBlock(block: string): unknown {
+  for (let end = block.length; end > 0; end--) {
+    try {
+      const parsed = JSON.parse(block.slice(0, end));
+      if (parsed !== null && typeof parsed === 'object') {
+        return parsed;
+      }
+    } catch {
+      /* continue */
+    }
+  }
+  const partial = extractPartialStringFields(block);
+  return Object.keys(partial).length ? partial : {};
+}
+
+function extractPartialStringFields(block: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const keys = ['project_name', 'task_label', 'state_summary'] as const;
+  for (const key of keys) {
+    const re = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)`);
+    const m = block.match(re);
+    if (m?.[1] !== undefined) {
+      out[key] = m[1]!.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+  }
+  const cont = block.match(/"continuity"\s*:\s*"(continue|switch|unclear)"/);
+  if (cont?.[1]) {
+    out.continuity = cont[1];
+  }
+  const conf = block.match(/"confidence"\s*:\s*([0-9.]+)/);
+  if (conf?.[1]) {
+    out.confidence = Number(conf[1]);
+  }
+  const distr = block.match(/"is_distracted"\s*:\s*(true|false)/);
+  if (distr?.[1]) {
+    out.is_distracted = distr[1] === 'true';
+  }
+  return out;
+}
+
 function parseStructuredPayload(raw: unknown): unknown {
   if (typeof raw !== 'string') {
     return raw;
   }
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
   if (!trimmed) {
     return {};
   }
-  return JSON.parse(extractJsonBlock(trimmed));
+  trimmed = stripCodeFences(trimmed);
+  const block = extractJsonBlock(trimmed);
+  try {
+    return JSON.parse(block);
+  } catch {
+    return lenientJsonParseBlock(block);
+  }
 }
 
 function extractCheckpointCandidate(raw: unknown): Record<string, unknown> {
@@ -265,5 +321,6 @@ export function normalizeCheckpointLlmOutput(raw: unknown): Record<string, unkno
     continuity: normalizeContinuityValue(firstAliasValue(candidate, FIELD_ALIASES.continuity)),
     confidence: normalizeNumberValue(firstAliasValue(candidate, FIELD_ALIASES.confidence)),
     is_distracted: normalizeBooleanValue(firstAliasValue(candidate, FIELD_ALIASES.is_distracted)),
+    category: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.category)),
   };
 }

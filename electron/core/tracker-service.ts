@@ -29,7 +29,7 @@ import { AppDatabase } from './db.js';
 import { captureScreenshot, deleteScreenshots } from './capture.js';
 import { DEFAULT_SETTINGS } from './defaults.js';
 import { shouldExcludeSnapshot } from './exclusions.js';
-import { analyzeWindow } from './llm.js';
+import { analyzeWindow, pingOllama } from './llm.js';
 import { collectMetadata } from './metadata.js';
 import { buildDashboard, buildDayTimeline, buildMonthTimeline, buildWeekTimeline } from './timeline.js';
 import { createWorkUnitFromCheckpoint, mergeCheckpointIntoWorkUnit, shouldMergeWorkUnit } from './work-units.js';
@@ -51,6 +51,9 @@ export class TrackerService {
   private captureTimer: NodeJS.Timeout | null = null;
   private analyzeTimer: NodeJS.Timeout | null = null;
   private isAnalyzing = false;
+  private isSuspended = false;
+  private analyzeSuppressedUntil = 0;
+  private resumeTimer: NodeJS.Timeout | null = null;
   private lastCaptureAt: string | null = null;
   private lastCheckpointAt: string | null = null;
   private lastError: string | null = null;
@@ -83,9 +86,28 @@ export class TrackerService {
 
   start(): void {
     this.reschedule();
+    void pingOllama(this.settings).catch(() => {});
     setTimeout(() => {
       void this.analyzeReadyWindows();
     }, 5_000);
+  }
+
+  onSuspend(): void {
+    this.isSuspended = true;
+  }
+
+  onResume(): void {
+    this.isSuspended = false;
+    this.analyzeSuppressedUntil = Date.now() + 60_000;
+    if (this.resumeTimer) {
+      clearTimeout(this.resumeTimer);
+    }
+    this.resumeTimer = setTimeout(async () => {
+      try {
+        await pingOllama(this.settings);
+      } catch {}
+      void this.analyzeReadyWindows();
+    }, 60_000);
   }
 
   dispose(): void {
@@ -94,6 +116,9 @@ export class TrackerService {
     }
     if (this.analyzeTimer) {
       clearInterval(this.analyzeTimer);
+    }
+    if (this.resumeTimer) {
+      clearTimeout(this.resumeTimer);
     }
     this.db.close();
   }
@@ -293,6 +318,9 @@ export class TrackerService {
   }
 
   private async captureSnapshot(force = false): Promise<void> {
+    if (this.isSuspended) {
+      return;
+    }
     if (!this.settings.isTracking && !force) {
       return;
     }
@@ -353,10 +381,16 @@ export class TrackerService {
   }
 
   private async analyzeReadyWindows(force = false): Promise<void> {
+    if (this.isSuspended) {
+      return;
+    }
     if (this.isAnalyzing) {
       return;
     }
     if (!this.settings.isTracking && !force) {
+      return;
+    }
+    if (!force && Date.now() < this.analyzeSuppressedUntil) {
       return;
     }
 
@@ -397,10 +431,24 @@ export class TrackerService {
           await deleteScreenshots(windowSnapshots);
           this.lastCheckpointAt = checkpoint.createdAt;
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'Failed to analyze snapshot window';
+          const err = error instanceof Error ? error : new Error('Failed to analyze snapshot window');
+          const message = err.message;
+          const stack = err.stack ?? null;
+          let kind = 'analysis';
+          if (err.name === 'AbortError' || message.includes('aborted')) {
+            kind = 'analysis:aborted';
+          } else if (/client closing|closing the connection/i.test(message)) {
+            kind = 'analysis:runner_unloaded';
+          } else if (message.includes('fetch failed') || message.toLowerCase().includes('econnreset')) {
+            kind = 'analysis:fetch_failed';
+          } else if (/Ollama request failed with 5\d\d.*\(after (\d+)ms/.test(message)) {
+            const m = message.match(/\(after (\d+)ms/);
+            const dur = m ? Number(m[1]) : 0;
+            kind = dur < 30_000 ? 'analysis:http_5xx_quick' : 'analysis:http_5xx_slow';
+          }
           this.lastError = message;
           this.db.incrementAnalysisAttempts(windowSnapshots.map((snapshot) => snapshot.id));
-          this.db.insertError('analysis', message, error instanceof Error ? error.stack : null);
+          this.db.insertError(kind, message, stack);
         }
       }
     } finally {

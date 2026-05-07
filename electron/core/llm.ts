@@ -14,9 +14,9 @@ import { normalizeCheckpointLlmOutput } from './llm-response.js';
 import { createId, trimText } from './utils.js';
 
 /** Caps vision payload; full window may contain many per-minute snapshots. */
-const MAX_SNAPSHOTS_FOR_LLM = 8;
+const MAX_SNAPSHOTS_FOR_LLM = 4;
 /** One frame per snapshot (main display) keeps multimodal context within model limits. */
-const MAX_VISION_IMAGES = 12;
+const MAX_VISION_IMAGES = 3;
 
 function pickSnapshotsForLlm(snapshots: SnapshotRecord[]): SnapshotRecord[] {
   if (snapshots.length <= MAX_SNAPSHOTS_FOR_LLM) {
@@ -131,6 +131,18 @@ function sanitizeProjectName(raw: string): string {
   return toStoredProjectName(t);
 }
 
+function sanitizeCategory(raw: string, settings: AppSettings): string {
+  const t = trimText(raw);
+  if (!t || looksDegenerateModelText(t)) {
+    return UNKNOWN_LABEL;
+  }
+  if (settings.categories.includes(t)) {
+    return t;
+  }
+  const matched = settings.categories.find((cat) => t.includes(cat) || cat.includes(t));
+  return matched ?? UNKNOWN_LABEL;
+}
+
 async function readImagesBase64(paths: string[]): Promise<string[]> {
   const images: string[] = [];
   for (const filePath of paths) {
@@ -153,6 +165,7 @@ function createCheckpointSchema(locale: SupportedLocale) {
     continuity: z.enum(['continue', 'switch', 'unclear']).default('unclear'),
     confidence: z.union([z.number(), z.string().transform(Number)]).pipe(z.number().min(0).max(1)).default(0.3),
     is_distracted: z.boolean().default(false),
+    category: z.string().default(UNKNOWN_LABEL),
   });
 }
 
@@ -197,10 +210,33 @@ continuity=${previousCheckpoint.continuity}
       : 'previous_checkpoint: none';
 
   if (locale === 'ja') {
+    const categoryList = settings.categories.join('、');
     return `
 あなたはローカル作業ログアプリの分類器です。
 目的は「提示された観測サンプルから、主作業を1つだけ分類すること」です。
 過剰推測は禁止。画像とメタデータの事実を優先する。
+
+【利用者プロファイル（市川さんの主要プロジェクト・判定ヒント）】
+- イングリード（EL）= 英語コーチング事業: englead.jp / engleadcoach* / 「イングリード」/ FC顧客リスト
+- タビケン留学（TR/TF）= 留学エージェント事業: tabiken-ryugaku.co.jp / 「タビケン」/ TF・TR の Notion DB
+- マーケ全社（MW）= Morrow World 全社: 組織図・全社戦略・経営Notion
+- myloggy / Albona = 個人プロジェクト: ~/myloggy / ~/albona / GitHub 該当repo
+- 広告運用 = 各広告プラットフォーム: Meta Ads Manager / Google Ads / TikTok Ads / Microsoft Ads
+- SEO記事 = 記事執筆・分析: WordPress / ZAQRO BACCA / タビケン記事DB
+- リール制作 = ショート動画: Kling / Grok Imagine / Instagram / ChatGPT(GPT Image)
+- CRM/事務 = バックオフィス: Salesforce / Jicoo / freee / ChatWork
+- AI開発 = 開発環境: Cursor / Claude Code / Anthropic console / OpenAI
+
+URL・アプリ名・ウィンドウタイトルからプロジェクトを推測して project_name に入れる。
+複数候補があるなら最も時間配分の長いものを選ぶ。確信が低くても上記の名称を優先採用し、本当に判定不能な時のみ "不明" を返す。
+
+【カテゴリ判定基準】（必ず以下から1つだけ選んで category に入れる）
+- 開発: Cursor/Claude Code でコード編集、ターミナル作業、エンジニアリング
+- 調査・情報収集: ブラウザでドキュメント・記事閲覧、ChatGPT壁打ち、競合調査、市場調査
+- 事務作業: スプシ集計、CRM入力、メール処理、書類作成、Notion更新、Slackで業務連絡
+- 打ち合わせ: GoogleMeet/Zoom が起動中、カレンダーイベント中、議事録記録
+- 休憩: アイドル状態、明確に作業から離れている
+- サボり: SNS閲覧、ニュースサイト、ECサイト、無関係動画など、業務と無関係な閲覧
 
 ${previousBlock}
 
@@ -211,9 +247,11 @@ ${snapshotLines.join('\n\n')}
 - 応答はJSONオブジェクト1つだけ。説明文・マークダウン・コードフェンス禁止。
 - 文字列はダブルクォートのみ。改行は \\n でエスケープ。
 - state_summary は120文字以内。evidence は各60文字以内、2〜6件。
-- キー: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted
+- キー: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted, category
 - continuity は continue / switch / unclear のみ。confidence は 0.0〜1.0。
-- project_name が不明なら "不明"。脱線なら is_distracted を true。
+- category は次のいずれかの文字列のみ: ${categoryList}（不明なら "不明"）
+- project_name は上記プロファイルの名称を優先。それ以外は画面から推測した固有名詞、判定不能なら "不明"。
+- 脱線なら is_distracted を true。
 
 モデル: ${settings.llmModel}
 `;
@@ -233,12 +271,78 @@ Strict rules:
 - Return a single JSON object only. No markdown, no code fences, no commentary.
 - Use double quotes for strings. Escape newlines as \\n.
 - Keep state_summary within 120 characters. Each evidence line within 60 characters; 2 to 6 items.
-- Keys: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted
+- Keys: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted, category
 - continuity is one of continue / switch / unclear. confidence is 0.0 to 1.0.
-- Use "Unknown" for project_name when unclear. Set is_distracted true only for clear off-task distraction.
+- category must be exactly one of: ${settings.categories.join(', ')} (use "Unknown" only if undetermined).
+- Use "Unknown" for project_name when truly unclear. Set is_distracted true only for clear off-task distraction.
 
 Model: ${settings.llmModel}
 `;
+}
+
+export async function pingOllama(settings: AppSettings, timeoutMs: number = 30_000): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${settings.ollamaHost}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: settings.llmModel,
+        prompt: 'ok',
+        stream: false,
+        options: { num_predict: 1, num_ctx: 512 },
+      }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+type OllamaCallResult = { response: Response; durationMs: number };
+
+async function callOllamaWithRetry(
+  body: string,
+  settings: AppSettings,
+  signal: AbortSignal,
+): Promise<OllamaCallResult> {
+  const url = `${settings.ollamaHost}/api/generate`;
+  const headers = { 'Content-Type': 'application/json' };
+  const QUICK_FAIL_MS = 30_000;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const t0 = Date.now();
+    try {
+      const response = await fetch(url, { method: 'POST', headers, signal, body });
+      const durationMs = Date.now() - t0;
+      if (response.ok) {
+        return { response, durationMs };
+      }
+      if (attempt === 1 && durationMs < QUICK_FAIL_MS) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        await pingOllama(settings, 30_000);
+        continue;
+      }
+      throw new Error(`Ollama request failed with ${response.status} (after ${durationMs}ms, attempt ${attempt})`);
+    } catch (err) {
+      const durationMs = Date.now() - t0;
+      const isAbort = err instanceof Error && err.name === 'AbortError';
+      if (isAbort) {
+        throw err;
+      }
+      if (attempt === 1 && durationMs < QUICK_FAIL_MS) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        await pingOllama(settings, 30_000);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Unreachable: callOllamaWithRetry exhausted attempts');
 }
 
 export async function analyzeWindow(params: {
@@ -257,29 +361,21 @@ export async function analyzeWindow(params: {
   const timeout = setTimeout(() => controller.abort(), settings.analysisTimeoutMs);
 
   try {
-    const response = await fetch(`${settings.ollamaHost}/api/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const body = JSON.stringify({
+      model: settings.llmModel,
+      prompt,
+      stream: false,
+      format: 'json',
+      options: {
+        temperature: 0.05,
+        repeat_penalty: 1.28,
+        num_predict: 768,
+        num_ctx: 16384,
       },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: settings.llmModel,
-        prompt,
-        stream: false,
-        format: 'json',
-        options: {
-          temperature: 0.05,
-          repeat_penalty: 1.28,
-          num_predict: 768,
-        },
-        images,
-      }),
+      images,
     });
 
-    if (!response.ok) {
-      throw new Error(`Ollama request failed with ${response.status}`);
-    }
+    const { response } = await callOllamaWithRetry(body, settings, controller.signal);
 
     const data = await response.json();
     const parsed = createCheckpointSchema(locale).parse(normalizeCheckpointLlmOutput(data));
@@ -295,7 +391,7 @@ export async function analyzeWindow(params: {
       endAt,
       projectName: sanitizeProjectName(trimText(parsed.project_name)),
       taskLabel: sanitizeTaskLabel(parsed.task_label, locale),
-      category: UNKNOWN_LABEL,
+      category: sanitizeCategory(parsed.category, settings),
       stateSummary: sanitizeSummary(parsed.state_summary, locale),
       evidence: sanitizeEvidence(parsed.evidence, locale),
       continuity: parsed.continuity,

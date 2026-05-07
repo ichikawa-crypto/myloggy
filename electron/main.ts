@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 
-import { app, BrowserWindow, ipcMain, nativeImage, Tray } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeImage, powerMonitor, Tray } from 'electron';
 
 import { normalizeLocale } from '../shared/localization.js';
 import type { AppSettings } from '../shared/types.js';
@@ -130,6 +130,12 @@ function createTray(): void {
 
 app.whenReady().then(() => {
   tracker = new TrackerService(path.join(app.getPath('userData'), 'myloggy-data'), normalizeLocale(app.getLocale()));
+  powerMonitor.on('suspend', () => {
+    tracker?.onSuspend();
+  });
+  powerMonitor.on('resume', () => {
+    tracker?.onResume();
+  });
   tracker.start();
   createTray();
   mainWindow = createMainWindow();
