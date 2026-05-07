@@ -31,10 +31,26 @@ export async function captureScreenshot(
 
   for (const displayIndex of targets) {
     const filePath = path.join(tempDir, `${snapshotId}-display-${displayIndex}.jpg`);
-    await execFileAsync('screencapture', ['-x', '-D', String(displayIndex), '-t', 'jpg', filePath]);
-    const buffer = await fs.readFile(filePath);
-    imagePaths.push(filePath);
-    imageHashes.push(hashBuffer(buffer));
+    if (mode === 'main') {
+      await execFileAsync('screencapture', ['-x', '-D', String(displayIndex), '-t', 'jpg', filePath]);
+      const buffer = await fs.readFile(filePath);
+      imagePaths.push(filePath);
+      imageHashes.push(hashBuffer(buffer));
+    } else {
+      try {
+        await execFileAsync('screencapture', ['-x', '-D', String(displayIndex), '-t', 'jpg', filePath]);
+        const buffer = await fs.readFile(filePath);
+        imagePaths.push(filePath);
+        imageHashes.push(hashBuffer(buffer));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`myloggy: capture skipped display ${displayIndex}: ${message}`);
+      }
+    }
+  }
+
+  if (mode === 'all' && imagePaths.length === 0) {
+    throw new Error('All display captures failed');
   }
 
   return {
