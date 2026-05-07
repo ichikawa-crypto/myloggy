@@ -163,6 +163,8 @@ export interface AppSettings {
   idleGapMinutes: number;
   categories: string[];
   onboardingCompleted: boolean;
+  idleExcludedApps: string[]; // idle判定から除外するアプリ名（大文字小文字を区別しない部分一致）
+  idleRequireStableImage: boolean; // true=ウィンドウ内imageHash全一致を要求、false=従来通り
 }
 
 export interface OllamaStatus {

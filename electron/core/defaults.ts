@@ -17,4 +17,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
   idleGapMinutes: 20,
   categories: DEFAULT_CATEGORIES,
   onboardingCompleted: false,
+  idleExcludedApps: [
+    'Cursor',
+    'Code',
+    'Visual Studio Code',
+    'Claude',
+    'iTerm2',
+    'Terminal',
+    'Warp',
+    'Ghostty',
+    'Alacritty',
+    'Hyper',
+  ],
+  idleRequireStableImage: true,
 };

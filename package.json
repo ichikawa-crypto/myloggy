@@ -24,6 +24,7 @@
     "prebuild": "node scripts/check-rollup-native.mjs",
     "build": "tsc -p tsconfig.node.json && vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "node --import tsx --test electron/core/llm.test.ts electron/core/llm-response.test.ts electron/core/idle.test.ts",
     "preview": "vite preview",
     "verify:mac:prod-env": "node scripts/verify-mac-production-env.js",
     "dist:mac:prod": "pnpm verify:mac:prod-env && pnpm build && electron-builder --mac --publish never",

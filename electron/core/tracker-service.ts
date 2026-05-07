@@ -29,6 +29,7 @@ import { AppDatabase } from './db.js';
 import { captureScreenshot, deleteScreenshots } from './capture.js';
 import { DEFAULT_SETTINGS } from './defaults.js';
 import { shouldExcludeSnapshot } from './exclusions.js';
+import { isIdleWindow } from './idle.js';
 import { analyzeWindow, pingOllama } from './llm.js';
 import { collectMetadata } from './metadata.js';
 import { buildDashboard, buildDayTimeline, buildMonthTimeline, buildWeekTimeline } from './timeline.js';
@@ -41,6 +42,11 @@ function normalizeSettings(settings: AppSettings): AppSettings {
     ...settings,
     language: isSupportedLocale(settings.language) ? settings.language : undefined,
     categories: categories.length ? categories : DEFAULT_SETTINGS.categories,
+    idleExcludedApps: Array.isArray(settings.idleExcludedApps) ? settings.idleExcludedApps : DEFAULT_SETTINGS.idleExcludedApps,
+    idleRequireStableImage:
+      typeof settings.idleRequireStableImage === 'boolean'
+        ? settings.idleRequireStableImage
+        : DEFAULT_SETTINGS.idleRequireStableImage,
   };
 }
 
@@ -261,15 +267,6 @@ export class TrackerService {
     }));
   }
 
-  private isIdleWindow(snapshots: SnapshotRecord[]): boolean {
-    if (snapshots.length < 2) return false;
-    const withCursor = snapshots.filter((s) => s.cursorX !== null && s.cursorY !== null);
-    if (withCursor.length < 2) return false;
-    const refX = withCursor[0]!.cursorX!;
-    const refY = withCursor[0]!.cursorY!;
-    return withCursor.every((s) => Math.abs(s.cursorX! - refX) <= 1 && Math.abs(s.cursorY! - refY) <= 1);
-  }
-
   private createIdleCheckpoint(snapshots: SnapshotRecord[]): import('../../shared/types.js').CheckpointRecord {
     const startAt = snapshots[0]!.capturedAt;
     const endAt = snapshots.at(-1)!.capturedAt;
@@ -414,7 +411,7 @@ export class TrackerService {
 
         try {
           let checkpoint: import('../../shared/types.js').CheckpointRecord;
-          if (this.isIdleWindow(windowSnapshots)) {
+          if (isIdleWindow(windowSnapshots, this.settings)) {
             checkpoint = this.createIdleCheckpoint(windowSnapshots);
           } else {
             const previous = this.db.getLastCheckpoint();
