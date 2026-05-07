@@ -38,3 +38,7 @@ app-update.yml
 *.sqlite
 *.sqlite3
 *.db
+data/sync_state.json
+data/sync_state.json.bak
+data/sync.lock
+logs/

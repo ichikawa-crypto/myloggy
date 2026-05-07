@@ -19,6 +19,11 @@ import {
 import { DEFAULT_SETTINGS } from './defaults.js';
 import { createId, safeJsonParse } from './utils.js';
 
+const MAX_TASK_LABEL = 120;
+const MAX_STATE_SUMMARY = 500;
+const MAX_PROJECT_NAME = 60;
+const MAX_EVIDENCE_ITEM = 80;
+
 type SqlValue = string | number | null;
 
 function normalizeBoolean(value: unknown): boolean | null {
@@ -410,6 +415,39 @@ export class AppDatabase {
   }
 
   insertCheckpoint(record: CheckpointRecord): void {
+    const truncateToMax = (
+      value: string,
+      maxLen: number,
+      field: 'task_label' | 'state_summary' | 'project_name',
+    ): string => {
+      if (value.length <= maxLen) {
+        return value;
+      }
+      console.warn('[insertCheckpoint] field truncated:', {
+        field,
+        originalLength: value.length,
+        id: record.id,
+      });
+      return `${value.slice(0, maxLen - 3)}…`;
+    };
+
+    const projectName = truncateToMax(record.projectName, MAX_PROJECT_NAME, 'project_name');
+    const taskLabel = truncateToMax(record.taskLabel, MAX_TASK_LABEL, 'task_label');
+    const stateSummary = truncateToMax(record.stateSummary, MAX_STATE_SUMMARY, 'state_summary');
+
+    const evidence = record.evidence.map((item, index) => {
+      if (item.length <= MAX_EVIDENCE_ITEM) {
+        return item;
+      }
+      console.warn('[insertCheckpoint] field truncated:', {
+        field: 'evidence',
+        originalLength: item.length,
+        id: record.id,
+        index,
+      });
+      return `${item.slice(0, MAX_EVIDENCE_ITEM - 3)}…`;
+    });
+
     this.run(
       `
       INSERT INTO checkpoints (
@@ -422,11 +460,11 @@ export class AppDatabase {
       record.id,
       record.startAt,
       record.endAt,
-      record.projectName,
-      record.taskLabel,
+      projectName,
+      taskLabel,
       record.category,
-      record.stateSummary,
-      JSON.stringify(record.evidence),
+      stateSummary,
+      JSON.stringify(evidence),
       record.continuity,
       record.confidence,
       JSON.stringify(record.sourceSnapshotIds),
