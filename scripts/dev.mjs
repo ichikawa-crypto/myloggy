@@ -1,14 +1,73 @@
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
+
+const devPidPath = path.join(os.tmpdir(), 'myloggy-dev.pid');
 
 const cwd = process.cwd();
 const preloadPath = path.join(cwd, 'dist-electron', 'electron', 'preload.js');
 
 function log(scope, message) {
   process.stdout.write(`[${scope}] ${message}\n`);
+}
+
+/** @returns {boolean} */
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code === 'ESRCH') {
+      return false;
+    }
+    if (code === 'EPERM') {
+      return true;
+    }
+    throw err;
+  }
+}
+
+function assertNoOtherDevProcess() {
+  if (!fs.existsSync(devPidPath)) {
+    return;
+  }
+  const raw = fs.readFileSync(devPidPath, 'utf8').trim();
+  const pid = Number.parseInt(raw, 10);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    try {
+      fs.unlinkSync(devPidPath);
+    } catch {
+      // ignore
+    }
+    return;
+  }
+  if (isPidAlive(pid)) {
+    process.stderr.write(
+      `[dev] another dev process is already running (pid=${pid}). abort.\n`,
+    );
+    process.exit(1);
+  }
+  try {
+    fs.unlinkSync(devPidPath);
+  } catch {
+    // ignore; will overwrite when claiming PID
+  }
+}
+
+function removeDevPidFile() {
+  try {
+    fs.unlinkSync(devPidPath);
+  } catch {
+    // ignore missing file / races
+  }
+}
+
+function writeDevPidFile() {
+  fs.writeFileSync(devPidPath, `${process.pid}\n`, 'utf8');
 }
 
 function pipeOutput(scope, child) {
@@ -87,13 +146,16 @@ async function waitForFile(filePath, timeoutMs = 30_000) {
 
 const children = new Set();
 
+function devProcessEnv(extraEnv = {}) {
+  const env = { ...process.env, ...extraEnv };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return env;
+}
+
 function spawnCommand(scope, command, args, extraEnv = {}) {
   const child = spawn(command, args, {
     cwd,
-    env: {
-      ...process.env,
-      ...extraEnv,
-    },
+    env: devProcessEnv(extraEnv),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -101,6 +163,15 @@ function spawnCommand(scope, command, args, extraEnv = {}) {
   pipeOutput(scope, child);
   child.on('exit', (code, signal) => {
     children.delete(child);
+    if (scope === 'dev:electron') {
+      if (signal) {
+        log(scope, `exited with signal ${signal}`);
+      } else {
+        log(scope, `exited with code ${code}`);
+      }
+      shutdown(0);
+      return;
+    }
     if (signal) {
       log(scope, `exited with signal ${signal}`);
       return;
@@ -120,6 +191,7 @@ function shutdown(code = 0) {
     return;
   }
   shuttingDown = true;
+  removeDevPidFile();
   for (const child of children) {
     child.kill('SIGTERM');
   }
@@ -130,7 +202,11 @@ process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
 async function main() {
+  assertNoOtherDevProcess();
+
   const port = await findFreePort(5173);
+  writeDevPidFile();
+
   const devServerUrl = `http://127.0.0.1:${port}`;
   log('dev', `using renderer port ${port}`);
 
