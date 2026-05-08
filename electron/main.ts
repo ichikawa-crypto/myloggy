@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 
 import { app, BrowserWindow, ipcMain, nativeImage, powerMonitor, Tray } from 'electron';
+import { Agent } from 'undici';
 
 import { normalizeLocale } from '../shared/localization.js';
 import type { AppSettings } from '../shared/types.js';
@@ -13,6 +14,14 @@ let tracker: TrackerService | null = null;
 let mainWindow: BrowserWindow | null = null;
 let miniWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+
+const ollamaDispatcher = new Agent({
+  headersTimeout: 600_000,
+  bodyTimeout: 600_000,
+  connect: { timeout: 30_000 },
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 600_000,
+});
 
 function broadcastSettingsChanged(settings: AppSettings): void {
   for (const win of [mainWindow, miniWindow]) {
@@ -216,12 +225,14 @@ ipcMain.handle('ollama:test-model', async (_event, params: { model: string; olla
         model: params.model,
         prompt: 'Reply with OK.',
         stream: false,
+        keep_alive: '30m',
         options: {
           temperature: 0,
           num_predict: 8,
         },
       }),
-    });
+      dispatcher: ollamaDispatcher,
+    } as Parameters<typeof fetch>[1] & { dispatcher: Agent });
 
     const data = await res.json().catch(() => ({})) as { error?: string };
     if (!res.ok) {

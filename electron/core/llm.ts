@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 
+import { Agent } from 'undici';
 import { z } from 'zod';
 
 import {
@@ -12,6 +13,14 @@ import {
 import type { AppSettings, CheckpointRecord, SnapshotRecord } from '../../shared/types.js';
 import { normalizeCheckpointLlmOutput } from './llm-response.js';
 import { createId, trimText } from './utils.js';
+
+const ollamaDispatcher = new Agent({
+  headersTimeout: 600_000,
+  bodyTimeout: 600_000,
+  connect: { timeout: 30_000 },
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 600_000,
+});
 
 /** Caps vision payload; full window may contain many per-minute snapshots. */
 const MAX_SNAPSHOTS_FOR_LLM = 4;
@@ -292,9 +301,11 @@ export async function pingOllama(settings: AppSettings, timeoutMs: number = 30_0
         model: settings.llmModel,
         prompt: 'ok',
         stream: false,
+        keep_alive: '30m',
         options: { num_predict: 1, num_ctx: 512 },
       }),
-    });
+      dispatcher: ollamaDispatcher,
+    } as Parameters<typeof fetch>[1] & { dispatcher: Agent });
     return response.ok;
   } catch {
     return false;
@@ -317,7 +328,13 @@ async function callOllamaWithRetry(
   for (let attempt = 1; attempt <= 2; attempt++) {
     const t0 = Date.now();
     try {
-      const response = await fetch(url, { method: 'POST', headers, signal, body });
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        signal,
+        body,
+        dispatcher: ollamaDispatcher,
+      } as Parameters<typeof fetch>[1] & { dispatcher: Agent });
       const durationMs = Date.now() - t0;
       if (response.ok) {
         return { response, durationMs };
@@ -365,6 +382,7 @@ export async function analyzeWindow(params: {
       model: settings.llmModel,
       prompt,
       stream: false,
+      keep_alive: '30m',
       format: 'json',
       options: {
         temperature: 0.05,
