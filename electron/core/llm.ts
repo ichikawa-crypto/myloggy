@@ -259,11 +259,13 @@ ${snapshotLines.join('\n\n')}
 厳守:
 - 応答はJSONオブジェクト1つだけ。説明文・マークダウン・コードフェンス禁止。
 - 文字列はダブルクォートのみ。改行は \\n でエスケープ。
-- state_summary は120文字以内。evidence は各60文字以内、2〜6件。
+- state_summary は **160文字以内**。観測サンプルの window_title/url/page_title から **具体的な固有名詞を必ず1つ以上引用** すること（チャンネル名・ファイル名・シート名・URL・特定タイトル等）。「Slackで業務連絡」「ブラウザで作業」のような一般化された表現は禁止。
+- evidence は **必ず2件以上、最大6件**。各60文字以内。各項目には観測サンプルから抽出した **具体的な要素**（アプリ名・window_title・URL・page_title の一部・固有名詞）を1つ以上含める。「画面が表示されている」のような抽象記述は禁止。
 - キー: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted, category
 - continuity は continue / switch / unclear のみ。confidence は 0.0〜1.0。
 - category は次のいずれかの文字列のみ: ${categoryList}（不明なら "不明"）
 - project_name は上記プロファイルの名称を優先。それ以外は画面から推測した固有名詞、判定不能なら "不明"。
+- task_label は具体的な動作（例: "Slack外部チャンネル確認", "スプシ集計", "Notion議事録更新"）。汎用ラベル（"事務作業"単独）禁止。
 - 脱線なら is_distracted を true。
 
 モデル: ${settings.llmModel}
@@ -283,10 +285,12 @@ ${snapshotLines.join('\n\n')}
 Strict rules:
 - Return a single JSON object only. No markdown, no code fences, no commentary.
 - Use double quotes for strings. Escape newlines as \\n.
-- Keep state_summary within 120 characters. Each evidence line within 60 characters; 2 to 6 items.
+- Keep state_summary within **160 characters**. It MUST cite at least one concrete proper noun observed in window_title/url/page_title (channel name, file name, sheet name, URL, specific title). Generic phrases like "communicating on Slack" or "browsing" are prohibited.
+- evidence MUST have **at least 2 items, up to 6**, each within 60 characters. Each item MUST reference a concrete element from the observation samples (app name, part of window_title/URL/page_title, specific proper noun). Abstract phrases like "screen is displayed" are prohibited.
 - Keys: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted, category
 - continuity is one of continue / switch / unclear. confidence is 0.0 to 1.0.
 - category must be exactly one of: ${settings.categories.join(', ')} (use "Unknown" only if undetermined).
+- task_label must describe a concrete action (e.g., "Reviewing external Slack channel", "Spreadsheet aggregation"). Generic labels are prohibited.
 - Use "Unknown" for project_name when truly unclear. Set is_distracted true only for clear off-task distraction.
 
 Model: ${settings.llmModel}
