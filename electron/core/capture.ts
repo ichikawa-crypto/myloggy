@@ -6,9 +6,79 @@ import { promisify } from 'node:util';
 import { screen } from 'electron';
 
 import type { SnapshotRecord } from '../../shared/types.js';
+import {
+  CAPTURE_JPEG_DOWNSAMPLE_ENABLED,
+  CAPTURE_JPEG_MAX_LONG_EDGE_PX,
+  CAPTURE_JPEG_SIPS_QUALITY,
+} from './defaults.js';
 import { hashBuffer } from './utils.js';
 
 const execFileAsync = promisify(execFile);
+
+function parseSipsPixelOutput(stdout: string): { width: number; height: number } | null {
+  const wMatch = /pixelWidth:\s*(\d+)/.exec(stdout);
+  const hMatch = /pixelHeight:\s*(\d+)/.exec(stdout);
+  if (!wMatch || !hMatch) return null;
+  return { width: Number(wMatch[1]), height: Number(hMatch[1]) };
+}
+
+async function getSipsPixelDimensions(filePath: string): Promise<{ width: number; height: number } | null> {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const { stdout } = await execFileAsync('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', filePath]);
+    return parseSipsPixelOutput(stdout);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * In-place JPEG downsample via macOS `sips` (no extra native deps). On failure or non-mac, leaves the file unchanged.
+ */
+async function downsampleCaptureJpegInPlace(filePath: string): Promise<void> {
+  if (!CAPTURE_JPEG_DOWNSAMPLE_ENABLED) return;
+  if (process.platform !== 'darwin') return;
+
+  let statBefore: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    statBefore = await fs.stat(filePath);
+  } catch {
+    return;
+  }
+
+  const dimsBefore = await getSipsPixelDimensions(filePath);
+  const label = `myloggy:capture:sips-resize:${path.basename(filePath)}`;
+  console.time(label);
+  try {
+    await execFileAsync('sips', [
+      '-Z',
+      String(CAPTURE_JPEG_MAX_LONG_EDGE_PX),
+      '-s',
+      'formatOptions',
+      String(CAPTURE_JPEG_SIPS_QUALITY),
+      filePath,
+    ]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`myloggy: sips resize failed (using original capture): ${message}`);
+    return;
+  } finally {
+    console.timeEnd(label);
+  }
+
+  try {
+    const statAfter = await fs.stat(filePath);
+    const dimsAfter = await getSipsPixelDimensions(filePath);
+    const beforeDim =
+      dimsBefore != null ? `${dimsBefore.width}x${dimsBefore.height}` : 'unknown';
+    const afterDim = dimsAfter != null ? `${dimsAfter.width}x${dimsAfter.height}` : 'unknown';
+    console.log(
+      `myloggy: capture jpeg ${path.basename(filePath)}: ${beforeDim} ${statBefore.size}b -> ${afterDim} ${statAfter.size}b`,
+    );
+  } catch {
+    // Debug logging only; ignore.
+  }
+}
 
 export interface CaptureResult {
   imagePath: string | null;
@@ -33,12 +103,14 @@ export async function captureScreenshot(
     const filePath = path.join(tempDir, `${snapshotId}-display-${displayIndex}.jpg`);
     if (mode === 'main') {
       await execFileAsync('screencapture', ['-x', '-D', String(displayIndex), '-t', 'jpg', filePath]);
+      await downsampleCaptureJpegInPlace(filePath);
       const buffer = await fs.readFile(filePath);
       imagePaths.push(filePath);
       imageHashes.push(hashBuffer(buffer));
     } else {
       try {
         await execFileAsync('screencapture', ['-x', '-D', String(displayIndex), '-t', 'jpg', filePath]);
+        await downsampleCaptureJpegInPlace(filePath);
         const buffer = await fs.readFile(filePath);
         imagePaths.push(filePath);
         imageHashes.push(hashBuffer(buffer));

@@ -22,6 +22,27 @@ const ollamaDispatcher = new Agent({
   keepAliveMaxTimeout: 600_000,
 });
 
+/** Shorter unload delay reduces idle VRAM when myloggy runs continuously (Ollama /api/generate). */
+const OLLAMA_KEEP_ALIVE = '30s';
+
+/** Inference context cap; vision tokens for 3 screen captures can exceed 24k, so 16384 is the practical floor. */
+const OLLAMA_NUM_CTX = 16384;
+
+/**
+ * Serialize every Ollama /api/generate fetch so only one HTTP request runs at a time (ping, retries, and vision inference share one queue).
+ * Ping is not on a separate lock: overlapping model warmup and analysis would still load the runner twice; callers rely on their own timeouts.
+ */
+let ollamaSerialTail: Promise<void> = Promise.resolve();
+
+function runWithOllamaSerial<T>(fn: () => Promise<T>): Promise<T> {
+  const task = ollamaSerialTail.then(() => fn());
+  ollamaSerialTail = task.then(
+    () => undefined,
+    () => undefined,
+  );
+  return task;
+}
+
 /** Caps vision payload; full window may contain many per-minute snapshots. */
 const MAX_SNAPSHOTS_FOR_LLM = 4;
 /** One frame per snapshot (main display) keeps multimodal context within model limits. */
@@ -301,19 +322,21 @@ export async function pingOllama(settings: AppSettings, timeoutMs: number = 30_0
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${settings.ollamaHost}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: settings.llmModel,
-        prompt: 'ok',
-        stream: false,
-        keep_alive: '30m',
-        options: { num_predict: 1, num_ctx: 512 },
-      }),
-      dispatcher: ollamaDispatcher,
-    } as Parameters<typeof fetch>[1] & { dispatcher: Agent });
+    const response = await runWithOllamaSerial(() =>
+      fetch(`${settings.ollamaHost}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: settings.llmModel,
+          prompt: 'ok',
+          stream: false,
+          keep_alive: OLLAMA_KEEP_ALIVE,
+          options: { num_predict: 1, num_ctx: 512 },
+        }),
+        dispatcher: ollamaDispatcher,
+      } as Parameters<typeof fetch>[1] & { dispatcher: Agent }),
+    );
     return response.ok;
   } catch {
     return false;
@@ -336,13 +359,15 @@ async function callOllamaWithRetry(
   for (let attempt = 1; attempt <= 2; attempt++) {
     const t0 = Date.now();
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        signal,
-        body,
-        dispatcher: ollamaDispatcher,
-      } as Parameters<typeof fetch>[1] & { dispatcher: Agent });
+      const response = await runWithOllamaSerial(() =>
+        fetch(url, {
+          method: 'POST',
+          headers,
+          signal,
+          body,
+          dispatcher: ollamaDispatcher,
+        } as Parameters<typeof fetch>[1] & { dispatcher: Agent }),
+      );
       const durationMs = Date.now() - t0;
       if (response.ok) {
         return { response, durationMs };
@@ -390,13 +415,13 @@ export async function analyzeWindow(params: {
       model: settings.llmModel,
       prompt,
       stream: false,
-      keep_alive: '30m',
+      keep_alive: OLLAMA_KEEP_ALIVE,
       format: 'json',
       options: {
         temperature: 0.05,
         repeat_penalty: 1.28,
         num_predict: 768,
-        num_ctx: 16384,
+        num_ctx: OLLAMA_NUM_CTX,
       },
       images,
     });

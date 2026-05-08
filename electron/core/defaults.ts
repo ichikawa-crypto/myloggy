@@ -1,6 +1,15 @@
 import type { AppSettings } from '../../shared/types.js';
 import { DEFAULT_CATEGORIES } from '../../shared/localization.js';
 
+/** Long-edge cap (px) for capture JPEG before LLM; `sips -Z` does not upscale smaller images. */
+export const CAPTURE_JPEG_MAX_LONG_EDGE_PX = 1920;
+
+/** JPEG quality (1-100) passed to `sips -s formatOptions` when re-encoding after resize. */
+export const CAPTURE_JPEG_SIPS_QUALITY = 75;
+
+/** Disable in-place downsample to preserve OCR/UI legibility. Set to true to re-enable. */
+export const CAPTURE_JPEG_DOWNSAMPLE_ENABLED = false;
+
 export const DEFAULT_SETTINGS: AppSettings = {
   isTracking: true,
   captureIntervalMinutes: 1,
