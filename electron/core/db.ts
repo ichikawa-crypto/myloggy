@@ -383,11 +383,31 @@ export class AppDatabase {
 
   incrementAnalysisAttempts(snapshotIds: string[]): void {
     const statement = this.db.prepare(
-      'UPDATE snapshots SET analysis_attempts = analysis_attempts + 1, status = ? WHERE id = ?',
+      'UPDATE snapshots SET analysis_attempts = analysis_attempts + 1, status = ? WHERE id = ? AND status != ?',
     );
     for (const id of snapshotIds) {
-      statement.run('analysis_failed', id);
+      statement.run('analysis_failed', id, 'analysis_failed_terminal');
     }
+  }
+
+  /** Dead-letter: mark snapshots that exceeded max retries (no checkpoint). Returns rows updated. */
+  markSnapshotsAnalysisFailedTerminal(snapshotIds: string[]): number {
+    if (!snapshotIds.length) {
+      return 0;
+    }
+    const placeholders = snapshotIds.map(() => '?').join(', ');
+    const result = this.db
+      .prepare(
+        `
+        UPDATE snapshots
+        SET status = 'analysis_failed_terminal'
+        WHERE checkpoint_id IS NULL
+          AND status IN ('captured', 'analysis_failed')
+          AND id IN (${placeholders})
+        `,
+      )
+      .run(...snapshotIds);
+    return Number(result.changes);
   }
 
   markSnapshotsProcessed(snapshotIds: string[], checkpointId: string): void {

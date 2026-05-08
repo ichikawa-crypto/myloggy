@@ -137,26 +137,58 @@ function createTray(): void {
   });
 }
 
-app.whenReady().then(() => {
-  tracker = new TrackerService(path.join(app.getPath('userData'), 'myloggy-data'), normalizeLocale(app.getLocale()));
-  powerMonitor.on('suspend', () => {
-    tracker?.onSuspend();
-  });
-  powerMonitor.on('resume', () => {
-    tracker?.onResume();
-  });
-  tracker.start();
-  createTray();
-  mainWindow = createMainWindow();
+function showAndFocusMainWindow(): void {
+  if (!mainWindow) {
+    mainWindow = createMainWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
 
-  app.on('activate', () => {
-    if (!mainWindow) {
-      mainWindow = createMainWindow();
-    } else {
-      mainWindow.show();
-    }
+if (!app.isPackaged) {
+  // Unpackaged Electron shares default userData with other Electron apps; single-instance lock would not
+  // exclude a second myloggy dev instance. Pin userData to the historical dev DB folder.
+  app.setName('myloggy');
+  const userDataDir = path.join(app.getPath('appData'), 'Electron', 'myloggy-data');
+  app.setPath('userData', userDataDir);
+}
+
+const primaryInstanceLock = app.requestSingleInstanceLock();
+if (!primaryInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    showAndFocusMainWindow();
   });
-});
+
+  app.whenReady().then(() => {
+    const trackerBaseDir = app.isPackaged
+      ? path.join(app.getPath('userData'), 'myloggy-data')
+      : app.getPath('userData');
+    tracker = new TrackerService(trackerBaseDir, normalizeLocale(app.getLocale()));
+    powerMonitor.on('suspend', () => {
+      tracker?.onSuspend();
+    });
+    powerMonitor.on('resume', () => {
+      tracker?.onResume();
+    });
+    tracker.start();
+    createTray();
+    mainWindow = createMainWindow();
+
+    app.on('activate', () => {
+      if (!mainWindow) {
+        mainWindow = createMainWindow();
+      } else {
+        mainWindow.show();
+      }
+    });
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -193,12 +225,7 @@ ipcMain.handle('tracking:clear-pending', () => requireTracker().clearPendingSnap
 ipcMain.handle('tracking:clear-errors', () => requireTracker().clearErrors());
 ipcMain.handle('work-unit:update', (_event, patch) => requireTracker().updateWorkUnit(patch));
 ipcMain.handle('open-dashboard', () => {
-  if (!mainWindow) {
-    mainWindow = createMainWindow();
-  } else {
-    mainWindow.show();
-    mainWindow.focus();
-  }
+  showAndFocusMainWindow();
 });
 ipcMain.handle('debug:data', () => requireTracker().getDebugData());
 ipcMain.handle('ollama:check', async () => {

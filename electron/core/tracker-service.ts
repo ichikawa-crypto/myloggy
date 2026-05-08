@@ -448,8 +448,23 @@ export class TrackerService {
           continue;
         }
 
-        const attempts = this.db.getAnalysisAttempts(windowSnapshots.map((snapshot) => snapshot.id));
+        const snapshotIds = windowSnapshots.map((snapshot) => snapshot.id);
+        const attempts = this.db.getAnalysisAttempts(snapshotIds);
         if (attempts >= this.settings.maxAnalysisRetries) {
+          const updated = this.db.markSnapshotsAnalysisFailedTerminal(snapshotIds);
+          if (updated > 0) {
+            const sample = windowSnapshots[0];
+            const label =
+              sample?.windowTitle ??
+              sample?.activeApp ??
+              sample?.pageTitle ??
+              '(unknown window)';
+            this.db.insertError(
+              'analysis:dead_letter',
+              `Analysis abandoned after ${this.settings.maxAnalysisRetries} attempt(s): ${label}`,
+              JSON.stringify({ snapshotIds, attempts, maxRetries: this.settings.maxAnalysisRetries }),
+            );
+          }
           continue;
         }
 

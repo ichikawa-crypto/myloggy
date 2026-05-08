@@ -71,6 +71,34 @@ test('normalizes structured object fields before the string schema parses them',
   assert.equal(parsed.is_distracted, false);
 });
 
+test('enriches generic Japanese task_label using sheet name from evidence[0]', () => {
+  const normalized = normalizeCheckpointLlmOutput({
+    project_name: 'その他',
+    task_label: 'スプレッドシート作業',
+    state_summary: '集計中',
+    evidence: ['シート名: 顧客管理_4月', 'URL: docs.google.com/spreadsheets/d/abc/edit', 'active_app=Google Chrome'],
+    continuity: 'continue',
+    confidence: 0.5,
+    is_distracted: false,
+  });
+  const parsed = checkpointSchema.parse(normalized);
+  assert.equal(parsed.task_label, '顧客管理_4月 スプレッドシート編集');
+});
+
+test('leaves task_label unchanged when generic label has no extractable subject in evidence', () => {
+  const normalized = normalizeCheckpointLlmOutput({
+    project_name: 'その他',
+    task_label: 'スプレッドシート作業',
+    state_summary: '作業中',
+    evidence: ['Chrome foreground', 'no sheet metadata'],
+    continuity: 'unclear',
+    confidence: 0.4,
+    is_distracted: false,
+  });
+  const parsed = checkpointSchema.parse(normalized);
+  assert.equal(parsed.task_label, 'スプレッドシート作業');
+});
+
 test('normalizes the reproduced evidence object array that previously triggered five invalid_type errors', () => {
   const parsed = checkpointSchema.parse(normalizeCheckpointLlmOutput({
     response: JSON.stringify({

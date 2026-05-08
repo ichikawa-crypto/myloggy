@@ -13,6 +13,52 @@ interface CategoryDefinition {
 export const UNKNOWN_LABEL = '不明';
 export const LEGACY_DISTRACTED_LABEL = '脱線';
 
+export const CANONICAL_PROJECTS = ['タビケン留学', 'マーケ全社', 'イングリード', 'アルボナ', 'その他'] as const;
+
+export const PROJECT_ALIASES: Record<string, string> = {
+  タビケン: 'タビケン留学',
+  タビケンフォース: 'タビケン留学',
+  TF: 'タビケン留学',
+  Albona: 'アルボナ',
+  albona: 'アルボナ',
+  ENGLEAD: 'イングリード',
+  EL: 'イングリード',
+  englead: 'イングリード',
+  'Morrow World': 'マーケ全社',
+  モロー: 'マーケ全社',
+  マーケ: 'マーケ全社',
+  不明: 'その他',
+  Unknown: 'その他',
+};
+
+export function canonicalizeProject(raw: string | null | undefined): string {
+  if (!raw) {
+    return 'その他';
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return 'その他';
+  }
+  const aliasHit = PROJECT_ALIASES[trimmed];
+  if (aliasHit) {
+    return aliasHit;
+  }
+  if ((CANONICAL_PROJECTS as readonly string[]).includes(trimmed)) {
+    return trimmed;
+  }
+  for (const [alias, canon] of Object.entries(PROJECT_ALIASES)) {
+    if (trimmed.includes(alias)) {
+      return canon;
+    }
+  }
+  for (const canon of CANONICAL_PROJECTS) {
+    if (trimmed.includes(canon)) {
+      return canon;
+    }
+  }
+  return 'その他';
+}
+
 const CATEGORY_DEFINITIONS: CategoryDefinition[] = [
   {
     id: 'development',
@@ -200,12 +246,14 @@ export function localizeSnapshotStatus(status: string, locale: SupportedLocale):
     if (status === 'captured') return '取得済み';
     if (status === 'processed') return '処理済み';
     if (status === 'analysis_failed') return '解析失敗';
+    if (status === 'analysis_failed_terminal') return '解析終了（再試行なし）';
     if (status === 'excluded') return '除外';
     return status;
   }
   if (status === 'captured') return 'Captured';
   if (status === 'processed') return 'Processed';
   if (status === 'analysis_failed') return 'Analysis failed';
+  if (status === 'analysis_failed_terminal') return 'Analysis abandoned (max retries)';
   if (status === 'excluded') return 'Excluded';
   return status;
 }

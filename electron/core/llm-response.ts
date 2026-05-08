@@ -311,13 +311,59 @@ function extractCheckpointCandidate(raw: unknown): Record<string, unknown> {
   return parsed;
 }
 
+/** When the model emits a vague task_label, pull a concrete subject from evidence (e.g. sheet name). Best-effort; never throws. */
+function tryExtractSubjectFromEvidenceLine(line: string): string | undefined {
+  const text = trimText(line);
+  if (!text) {
+    return undefined;
+  }
+  const sheetJa = text.match(/シート名\s*[:：]\s*(.+)/);
+  if (sheetJa?.[1]) {
+    return trimText(sheetJa[1]).replace(/^['"`「]+|['"`」]+$/g, '');
+  }
+  const sheetEn = text.match(/sheet\s*name\s*[:：]\s*(.+)/i);
+  if (sheetEn?.[1]) {
+    return trimText(sheetEn[1]).replace(/^['"`]+|['"`]+$/g, '');
+  }
+  return undefined;
+}
+
+const GENERIC_TASK_LABELS_JA = new Set(['事務作業', 'スプレッドシート作業', 'スプシ作業', 'コーディング']);
+
+function enrichGenericTaskLabel(taskLabel: string | undefined, evidence: string[] | undefined): string | undefined {
+  const label = trimText(taskLabel ?? '');
+  if (!label || !evidence?.length) {
+    return taskLabel;
+  }
+  if (!GENERIC_TASK_LABELS_JA.has(label)) {
+    return taskLabel;
+  }
+  const subject = tryExtractSubjectFromEvidenceLine(evidence[0]!);
+  if (!subject) {
+    return taskLabel;
+  }
+  if (label === 'スプレッドシート作業' || label === 'スプシ作業') {
+    return `${subject} スプレッドシート編集`;
+  }
+  if (label === '事務作業') {
+    return `${subject} 事務作業`;
+  }
+  if (label === 'コーディング') {
+    return `${subject} コーディング`;
+  }
+  return taskLabel;
+}
+
 export function normalizeCheckpointLlmOutput(raw: unknown): Record<string, unknown> {
   const candidate = extractCheckpointCandidate(raw);
+  const evidence = normalizeEvidenceValue(firstAliasValue(candidate, FIELD_ALIASES.evidence));
+  const taskRaw = normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.task_label));
+  const taskRefined = enrichGenericTaskLabel(taskRaw, evidence) ?? taskRaw;
   return {
     project_name: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.project_name)),
-    task_label: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.task_label)),
+    task_label: taskRefined,
     state_summary: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.state_summary)),
-    evidence: normalizeEvidenceValue(firstAliasValue(candidate, FIELD_ALIASES.evidence)),
+    evidence,
     continuity: normalizeContinuityValue(firstAliasValue(candidate, FIELD_ALIASES.continuity)),
     confidence: normalizeNumberValue(firstAliasValue(candidate, FIELD_ALIASES.confidence)),
     is_distracted: normalizeBooleanValue(firstAliasValue(candidate, FIELD_ALIASES.is_distracted)),

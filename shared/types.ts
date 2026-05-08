@@ -4,7 +4,12 @@ export type WorkCategory = string;
 
 export type Continuity = 'continue' | 'switch' | 'unclear';
 
-export type SnapshotStatus = 'captured' | 'processed' | 'analysis_failed' | 'excluded';
+export type SnapshotStatus =
+  | 'captured'
+  | 'processed'
+  | 'analysis_failed'
+  | 'analysis_failed_terminal'
+  | 'excluded';
 
 export type DisplayCaptureMode = 'main' | 'all';
 
