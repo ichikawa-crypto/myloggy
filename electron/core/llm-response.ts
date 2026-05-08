@@ -202,6 +202,103 @@ function hasCheckpointShape(record: Record<string, unknown>): boolean {
   return Object.values(FIELD_ALIASES).some((aliases) => aliases.some((alias) => alias in record));
 }
 
+const DISPLAY_INDEX_ALIASES = ['display_index', 'displayIndex'] as const;
+
+/** Drill through Ollama/string envelopes until we reach a `{ primary, secondary }` wrapper or flat checkpoint JSON. */
+function resolveLlmPayloadRoot(raw: unknown): Record<string, unknown> {
+  let cur: unknown = raw;
+  for (let depth = 0; depth < 12; depth++) {
+    const parsed = parseStructuredPayload(cur);
+    let rec: Record<string, unknown>;
+    if (Array.isArray(parsed)) {
+      let chosen: Record<string, unknown> = {};
+      for (const element of parsed) {
+        const next = resolveLlmPayloadRoot(element);
+        if (Object.keys(next).length) {
+          chosen = next;
+          break;
+        }
+      }
+      return chosen;
+    }
+    if (!isRecord(parsed)) {
+      return {};
+    }
+    rec = parsed;
+
+    if ('primary' in rec && isRecord(rec.primary)) {
+      return rec;
+    }
+    if (hasCheckpointShape(rec)) {
+      return rec;
+    }
+
+    let progressed = false;
+    for (const key of ENVELOPE_KEYS) {
+      if (!(key in rec)) {
+        continue;
+      }
+      cur = rec[key];
+      progressed = true;
+      break;
+    }
+    if (!progressed) {
+      return rec;
+    }
+  }
+  return {};
+}
+
+function normalizeCheckpointFields(candidate: Record<string, unknown>): Record<string, unknown> {
+  const evidence = normalizeEvidenceValue(firstAliasValue(candidate, FIELD_ALIASES.evidence));
+  const taskRaw = normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.task_label));
+  const taskRefined = enrichGenericTaskLabel(taskRaw, evidence) ?? taskRaw;
+  return {
+    project_name: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.project_name)),
+    task_label: taskRefined,
+    state_summary: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.state_summary)),
+    evidence,
+    continuity: normalizeContinuityValue(firstAliasValue(candidate, FIELD_ALIASES.continuity)),
+    confidence: normalizeNumberValue(firstAliasValue(candidate, FIELD_ALIASES.confidence)),
+    is_distracted: normalizeBooleanValue(firstAliasValue(candidate, FIELD_ALIASES.is_distracted)),
+    category: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.category)),
+  };
+}
+
+/** Secondary row: display_index + same task fields as primary (no continuity/confidence/is_distracted). */
+export function normalizeSecondaryItemOutput(item: Record<string, unknown>): Record<string, unknown> {
+  const evidence = normalizeEvidenceValue(firstAliasValue(item, FIELD_ALIASES.evidence));
+  const taskRaw = normalizeTextValue(firstAliasValue(item, FIELD_ALIASES.task_label));
+  const taskRefined = enrichGenericTaskLabel(taskRaw, evidence) ?? taskRaw;
+  const displayRaw = firstAliasValue(item, DISPLAY_INDEX_ALIASES);
+  const displayNum = normalizeNumberValue(displayRaw);
+  return {
+    display_index: displayNum,
+    project_name: normalizeTextValue(firstAliasValue(item, FIELD_ALIASES.project_name)),
+    task_label: taskRefined,
+    state_summary: normalizeTextValue(firstAliasValue(item, FIELD_ALIASES.state_summary)),
+    evidence,
+    category: normalizeTextValue(firstAliasValue(item, FIELD_ALIASES.category)),
+  };
+}
+
+export function normalizeCheckpointLlmOutputWithSecondary(raw: unknown): {
+  primary: Record<string, unknown>;
+  secondary: Record<string, unknown>[];
+} {
+  const root = resolveLlmPayloadRoot(raw);
+  const primarySource = 'primary' in root && isRecord(root.primary) ? root.primary : root;
+  const primaryCandidate = extractCheckpointCandidate(primarySource);
+  const secondaryList =
+    'secondary' in root && Array.isArray(root.secondary)
+      ? root.secondary.filter((item): item is Record<string, unknown> => isRecord(item))
+      : [];
+  return {
+    primary: normalizeCheckpointFields(primaryCandidate),
+    secondary: secondaryList.map((item) => normalizeSecondaryItemOutput(item)),
+  };
+}
+
 export function extractJsonBlock(content: string): string {
   const trimmed = content.trim();
   const objectStart = trimmed.indexOf('{');
@@ -355,18 +452,5 @@ function enrichGenericTaskLabel(taskLabel: string | undefined, evidence: string[
 }
 
 export function normalizeCheckpointLlmOutput(raw: unknown): Record<string, unknown> {
-  const candidate = extractCheckpointCandidate(raw);
-  const evidence = normalizeEvidenceValue(firstAliasValue(candidate, FIELD_ALIASES.evidence));
-  const taskRaw = normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.task_label));
-  const taskRefined = enrichGenericTaskLabel(taskRaw, evidence) ?? taskRaw;
-  return {
-    project_name: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.project_name)),
-    task_label: taskRefined,
-    state_summary: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.state_summary)),
-    evidence,
-    continuity: normalizeContinuityValue(firstAliasValue(candidate, FIELD_ALIASES.continuity)),
-    confidence: normalizeNumberValue(firstAliasValue(candidate, FIELD_ALIASES.confidence)),
-    is_distracted: normalizeBooleanValue(firstAliasValue(candidate, FIELD_ALIASES.is_distracted)),
-    category: normalizeTextValue(firstAliasValue(candidate, FIELD_ALIASES.category)),
-  };
+  return normalizeCheckpointLlmOutputWithSecondary(raw).primary;
 }

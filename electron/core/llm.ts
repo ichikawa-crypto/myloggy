@@ -11,8 +11,8 @@ import {
   localizeUnknownTaskLabel,
   type SupportedLocale,
 } from '../../shared/localization.js';
-import type { AppSettings, CheckpointRecord, SnapshotRecord } from '../../shared/types.js';
-import { normalizeCheckpointLlmOutput } from './llm-response.js';
+import type { AppSettings, CheckpointRecord, SecondaryActivity, SnapshotRecord } from '../../shared/types.js';
+import { normalizeCheckpointLlmOutputWithSecondary } from './llm-response.js';
 import { createId, trimText } from './utils.js';
 
 const ollamaDispatcher = new Agent({
@@ -46,7 +46,7 @@ function runWithOllamaSerial<T>(fn: () => Promise<T>): Promise<T> {
 
 /** Caps vision payload; full window may contain many per-minute snapshots. */
 const MAX_SNAPSHOTS_FOR_LLM = 4;
-/** One frame per snapshot (main display) keeps multimodal context within model limits. */
+/** One frame per logical display keeps multimodal context within model limits (merged across snapshots, newest wins per display index). */
 const MAX_VISION_IMAGES = 3;
 
 function pickSnapshotsForLlm(snapshots: SnapshotRecord[]): SnapshotRecord[] {
@@ -62,18 +62,36 @@ function pickSnapshotsForLlm(snapshots: SnapshotRecord[]): SnapshotRecord[] {
   return [...indices].sort((a, b) => a - b).map((i) => snapshots[i]!);
 }
 
-function collectVisionImagePaths(snapshots: SnapshotRecord[]): string[] {
-  const paths: string[] = [];
-  for (const snapshot of snapshots) {
+/**
+ * Prefer the latest snapshot per display index, then emit paths in ascending display order (0, 1, 2 …).
+ * Stops after `MAX_VISION_IMAGES` paths.
+ */
+export function collectVisionImagePaths(snapshots: SnapshotRecord[]): string[] {
+  const byDisplay = new Map<number, string>();
+  for (let s = snapshots.length - 1; s >= 0; s--) {
+    const snapshot = snapshots[s]!;
     const list = snapshot.imagePaths.length ? snapshot.imagePaths : snapshot.imagePath ? [snapshot.imagePath] : [];
-    const primary = list[0];
-    if (!primary) {
-      continue;
+    for (let displayIndex = 0; displayIndex < list.length; displayIndex++) {
+      const candidate = list[displayIndex];
+      const filePath = typeof candidate === 'string' ? trimText(candidate) : '';
+      if (!filePath) {
+        continue;
+      }
+      if (!byDisplay.has(displayIndex)) {
+        byDisplay.set(displayIndex, filePath);
+      }
     }
+  }
+  const indices = [...byDisplay.keys()].sort((a, b) => a - b);
+  const paths: string[] = [];
+  for (const i of indices) {
     if (paths.length >= MAX_VISION_IMAGES) {
-      return paths;
+      break;
     }
-    paths.push(primary);
+    const p = byDisplay.get(i);
+    if (p) {
+      paths.push(p);
+    }
   }
   return paths;
 }
@@ -172,6 +190,35 @@ function applyInsufficientEvidenceTaskLabelPrefix(taskLabel: string, locale: Sup
   return locale === 'ja' ? `(根拠不足な)${taskLabel}` : `(insufficient evidence) ${taskLabel}`;
 }
 
+function enrichTaskLabelWithSnapshotMetadata(
+  taskLabel: string,
+  locale: SupportedLocale,
+  snapshot: SnapshotRecord | undefined,
+): string {
+  if (!snapshot) {
+    return taskLabel;
+  }
+  const trimmed = trimText(taskLabel);
+  const unknownPhrase = localizeUnknownTaskLabel(locale);
+  const insufficientPrefixed =
+    locale === 'ja'
+      ? trimmed.startsWith('(根拠不足な)')
+      : trimmed.toLowerCase().startsWith('(insufficient evidence)');
+  if (trimmed !== unknownPhrase && !insufficientPrefixed) {
+    return taskLabel;
+  }
+
+  const parts = [snapshot.activeApp, snapshot.windowTitle, snapshot.pageTitle].map((s) => trimText(s ?? '')).filter(Boolean);
+  if (!parts.length) {
+    return taskLabel;
+  }
+  const hint = parts.slice(0, 2).join(' · ');
+  if (insufficientPrefixed) {
+    return sanitizeTaskLabel(`${trimmed} ${hint}`, locale);
+  }
+  return sanitizeTaskLabel(hint, locale);
+}
+
 function sanitizeCategory(raw: string, settings: AppSettings): string {
   const t = trimText(raw);
   if (!t || looksDegenerateModelText(t)) {
@@ -212,6 +259,58 @@ function createCheckpointSchema(locale: SupportedLocale) {
     is_distracted: z.boolean().default(false),
     category: z.string().default(UNKNOWN_LABEL),
   });
+}
+
+function createSecondaryActivitySchema(locale: SupportedLocale) {
+  const displayIndex = z.preprocess((value) => {
+    const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(trimText(value)) : Number.NaN;
+    return Number.isFinite(n) ? n : 0;
+  }, z.number().int().nonnegative());
+
+  return z.object({
+    display_index: displayIndex,
+    project_name: z.string().default('その他'),
+    task_label: z.string().default(localizeUnknownTaskLabel(locale)),
+    state_summary: z.string().default(localizeInsufficientInfoSummary(locale)),
+    evidence: z.array(z.string()).default([locale === 'ja' ? 'メタ情報不足' : 'Insufficient metadata']),
+    category: z.string().default(UNKNOWN_LABEL),
+  });
+}
+
+/** Applies the same sanitization as primary checkpoint rows (used by tests). */
+export function materializeSecondaryActivities(
+  normalizedRows: Record<string, unknown>[],
+  settings: AppSettings,
+  locale: SupportedLocale,
+  metaSnapshot?: SnapshotRecord,
+): SecondaryActivity[] {
+  const schema = createSecondaryActivitySchema(locale);
+  const out: SecondaryActivity[] = [];
+  for (const row of normalizedRows) {
+    let parsed;
+    try {
+      parsed = schema.parse(row);
+    } catch {
+      continue;
+    }
+
+    let evidence = sanitizeEvidence(parsed.evidence, locale);
+    let taskLabel = sanitizeTaskLabel(parsed.task_label, locale);
+    if (evidence.length < 3) {
+      taskLabel = applyInsufficientEvidenceTaskLabelPrefix(taskLabel, locale);
+    }
+    taskLabel = enrichTaskLabelWithSnapshotMetadata(taskLabel, locale, metaSnapshot);
+
+    out.push({
+      displayIndex: parsed.display_index,
+      projectName: sanitizeProjectName(trimText(parsed.project_name)),
+      category: sanitizeCategory(parsed.category, settings),
+      taskLabel,
+      stateSummary: sanitizeSummary(parsed.state_summary, locale),
+      evidence,
+    });
+  }
+  return out;
 }
 
 function buildPrompt(
@@ -306,12 +405,58 @@ ${previousBlock}
 観測サンプル（時系列）:
 ${snapshotLines.join('\n\n')}
 
+## マルチディスプレイ判定（重要）
+複数モニタ時、添付画像は先頭から順に display 0, display 1, display 2 … に対応します。
+ユーザーはモニタごとに別作業を並行している可能性があります。
+
+一次集計（ワークユニット）の対象は primary のみです。他モニタで明確に異なる実作業がある場合のみ secondary に追記します。
+
+### 推奨レスポンスJSON形
+{
+  "primary": {
+    "project_name": "（5値のいずれか）",
+    "category": "（上記カテゴリ一覧のいずれか）",
+    "task_label": "...",
+    "state_summary": "...",
+    "evidence": ["...", "...", "..."],
+    "continuity": "continue|switch|unclear",
+    "confidence": 0.0,
+    "is_distracted": false,
+    "display_index": 0
+  },
+  "secondary": [
+    {
+      "display_index": 1,
+      "project_name": "...",
+      "category": "...",
+      "task_label": "...",
+      "state_summary": "...",
+      "evidence": ["...", "...", "..."]
+    }
+  ]
+}
+
+### primary の選定
+- cursor_display_index が分かるときはそのモニタ優先
+- 最も具体的な作業が読み取れるモニタ
+- 不明なら display 0
+
+### secondary に入れる条件（0〜2件目安）
+- primary と project_name または task_label の対象が明確に違うときだけ
+- 参照用のブラウザ・通知だけ・「見ているだけ」は除外
+- 同一スプレッドシートのコピペ連動など、一本の作業の延長は除外
+- 各要素も evidence は **3件以上**、project_name は **5値のみ**、category は上記マスタに合わせる
+
+### 後方互換
+単一モニタや旧モデルではトップレベルに従来どおり project_name, task_label, … を置いてもよい（secondary は省略可）。
+
 厳守:
 - 応答はJSONオブジェクト1つだけ。説明文・マークダウン・コードフェンス禁止。
 - 文字列はダブルクォートのみ。改行は \\n でエスケープ。
 - state_summary は最大160文字。観測にない事実は書かない。固有名詞は evidence / window_title / url と整合させる。
-- evidence は **必ず3件以上、最大6件**。各60文字以内。抽象的な一文は禁止; 観測サンプル由来の語を必ず含める。
-- キー: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted, category
+- primary の evidence は **必ず3件以上、最大6件**。各60文字以内。抽象的な一文は禁止; 観測サンプル由来の語を必ず含める。
+- ラッパー形のとき primary に continuity, confidence, is_distracted, category を含める。secondary 各要素にも category / evidence（3件以上）を含める。
+- 単一オブジェクト形のとき、キーは従来どおり: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted, category
 - continuity は continue / switch / unclear のみ。confidence は 0.0〜1.0。
 - category は次のいずれかの文字列のみ: ${categoryList}（不明なら "不明"）
 - project_name は上記5値のみ（不明瞭なら「その他」）。
@@ -356,9 +501,6 @@ Hints: docs.google.com → infer from file/sheet names; Slack → channel names;
 
 ${previousBlock}
 
-Observation samples (time-ordered):
-${snapshotLines.join('\n\n')}
-
 ## task_label (required, ~15–30 chars)
 Format: "<specific object/name> + <concrete action>".
 Good: "顧客管理シートのCPA列計算", "Slack #11-EL-運用ch でチャネル戦略議論", "myloggy llm.ts のプロンプト編集"
@@ -368,12 +510,59 @@ If the target cannot be identified: "(対象不明な)<action>" without inventin
 ## state_summary (required, ~40–80 chars target, max 160)
 One sentence: why/what/how. Reuse vocabulary from evidence. If detail is uncertain, keep it short and honest.
 
+Observation samples (time-ordered):
+${snapshotLines.join('\n\n')}
+
+## Multi-monitor analysis (important)
+When multiple images are provided, they correspond in order to display 0, display 1, display 2 …
+The user may be doing different substantive work on different screens.
+Only **primary** feeds the main work-unit timeline; put clearly distinct work on other monitors in **secondary**.
+
+### Preferred JSON shape
+{
+  "primary": {
+    "project_name": "(one of the five Japanese canonical names)",
+    "category": "(one category from the list below)",
+    "task_label": "...",
+    "state_summary": "...",
+    "evidence": ["...", "...", "..."],
+    "continuity": "continue|switch|unclear",
+    "confidence": 0.0,
+    "is_distracted": false,
+    "display_index": 0
+  },
+  "secondary": [
+    {
+      "display_index": 1,
+      "project_name": "...",
+      "category": "...",
+      "task_label": "...",
+      "state_summary": "...",
+      "evidence": ["...", "...", "..."]
+    }
+  ]
+}
+
+### Choosing primary
+- Prefer the monitor indicated by cursor_display_index in metadata when credible
+- Otherwise the monitor showing the most concrete active work
+- If unclear, assume display 0
+
+### Secondary rules (typically 0–2 items)
+- Only when project_name OR task_label target clearly differs from primary
+- Exclude passive/reference-only browser panels, stray notifications, or “just watching”
+- Exclude tightly coupled continuity (same spreadsheet paste flow counts as one task)
+- Each secondary item MUST also use the five canonical project names, MUST include **at least three** concrete evidence strings, and reuse allowed categories only
+
+### Backward compatibility
+For a single screen or legacy models you may omit the wrapper and emit the flat JSON with project_name, task_label, … at the top level; omit secondary if unused.
+
 Strict rules:
 - Return a single JSON object only. No markdown, no code fences, no commentary.
 - Use double quotes for strings. Escape newlines as \\n.
 - state_summary max 160 characters; no facts not grounded in observations; align proper nouns with evidence and metadata.
-- evidence MUST have **at least 3 items, up to 6**, each within 60 characters, each citing something concrete from the samples. No vague filler.
-- Keys: project_name, task_label, state_summary, evidence, continuity, confidence, is_distracted, category
+- **primary.evidence** MUST have **at least 3 items, up to 6**, each within 60 characters, each citing something concrete from the samples. No vague filler.
+- In wrapper form, secondary entries follow the same evidence / project_name rules.
 - continuity is one of continue / switch / unclear. confidence is 0.0 to 1.0.
 - category must be exactly one of: ${settings.categories.join(', ')} (use "Unknown" only if undetermined).
 - project_name must be one of the five Japanese strings above (use その他 when unclear).
@@ -512,13 +701,19 @@ export async function analyzeWindow(params: {
     const { response } = await callOllamaWithRetry(body, settings, controller.signal);
 
     const data = await response.json();
-    const parsed = createCheckpointSchema(locale).parse(normalizeCheckpointLlmOutput(data));
+    const normalized = normalizeCheckpointLlmOutputWithSecondary(data);
+    const parsed = createCheckpointSchema(locale).parse(normalized.primary);
 
     const evidence = sanitizeEvidence(parsed.evidence, locale);
     let taskLabel = sanitizeTaskLabel(parsed.task_label, locale);
     if (evidence.length < 3) {
       taskLabel = applyInsufficientEvidenceTaskLabelPrefix(taskLabel, locale);
     }
+
+    const latestSnapshot = forLlm.at(-1);
+    taskLabel = enrichTaskLabelWithSnapshotMetadata(taskLabel, locale, latestSnapshot);
+
+    const secondaryActivities = materializeSecondaryActivities(normalized.secondary, settings, locale, latestSnapshot);
 
     const startAt = snapshots[0]?.capturedAt ?? new Date().toISOString();
     const endAt = snapshots.at(-1)?.capturedAt ?? startAt;
@@ -543,6 +738,7 @@ export async function analyzeWindow(params: {
       status: 'completed',
       appSummary,
       urlSummary,
+      secondaryActivities,
     };
   } finally {
     clearTimeout(timeout);

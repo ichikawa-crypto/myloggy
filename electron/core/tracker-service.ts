@@ -26,8 +26,14 @@ import type {
   WorkUnitRecord,
 } from '../../shared/types.js';
 import { AppDatabase } from './db.js';
-import { captureScreenshot, deleteScreenshots } from './capture.js';
-import { DEFAULT_SETTINGS } from './defaults.js';
+import { captureScreenshot, cleanupOrphanTempSnaps, deleteScreenshots } from './capture.js';
+import {
+  CLEANUP_INTERVAL_HOURS,
+  DEFAULT_SETTINGS,
+  ERROR_LOG_TTL_DAYS,
+  SNAPSHOT_TTL_DAYS,
+  TEMP_SNAPS_TTL_DAYS,
+} from './defaults.js';
 import { shouldExcludeSnapshot } from './exclusions.js';
 import { isIdleWindow } from './idle.js';
 import { analyzeWindow, pingOllama } from './llm.js';
@@ -100,6 +106,7 @@ export class TrackerService {
   private settings: AppSettings;
   private captureTimer: NodeJS.Timeout | null = null;
   private analyzeTimer: NodeJS.Timeout | null = null;
+  private cleanupTimer: NodeJS.Timeout | null = null;
   private isAnalyzing = false;
   private isSuspended = false;
   private analyzeSuppressedUntil = 0;
@@ -135,6 +142,13 @@ export class TrackerService {
   }
 
   start(): void {
+    void this.runCleanup();
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+    }
+    this.cleanupTimer = setInterval(() => {
+      void this.runCleanup();
+    }, CLEANUP_INTERVAL_HOURS * 3600 * 1000);
     this.reschedule();
     void pingOllama(this.settings).catch(() => {});
     setTimeout(() => {
@@ -161,6 +175,10 @@ export class TrackerService {
   }
 
   dispose(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
     if (this.captureTimer) {
       clearInterval(this.captureTimer);
     }
@@ -332,7 +350,25 @@ export class TrackerService {
       status: 'completed',
       appSummary: [],
       urlSummary: [],
+      secondaryActivities: [],
     };
+  }
+
+  private async runCleanup(): Promise<void> {
+    try {
+      const snapshots = this.db.cleanupOldSnapshots(SNAPSHOT_TTL_DAYS);
+      const errorLogs = this.db.cleanupOldErrorLogs(ERROR_LOG_TTL_DAYS);
+      const tempSnaps = await cleanupOrphanTempSnaps(this.tempDir, TEMP_SNAPS_TTL_DAYS);
+      console.log(`[myloggy:cleanup] removed snapshots=${snapshots} errorLogs=${errorLogs} tempSnaps=${tempSnaps}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const detail = error instanceof Error ? error.stack ?? null : null;
+      try {
+        this.db.insertError('cleanup', message, detail);
+      } catch {
+        // Best effort; never block shutdown or startup.
+      }
+    }
   }
 
   private reschedule(): void {

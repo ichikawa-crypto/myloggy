@@ -6,6 +6,7 @@ import type {
   AppSettings,
   CheckpointRecord,
   ErrorLogRecord,
+  SecondaryActivity,
   SnapshotRecord,
   WorkUnitPatch,
   WorkUnitRecord,
@@ -13,6 +14,7 @@ import type {
 import {
   isLegacyDistractedCategory,
   isUnknownLabel,
+  UNKNOWN_LABEL,
   toStoredCategoryLabel,
   toStoredProjectName,
 } from '../../shared/localization.js';
@@ -23,6 +25,26 @@ const MAX_TASK_LABEL = 120;
 const MAX_STATE_SUMMARY = 500;
 const MAX_PROJECT_NAME = 60;
 const MAX_EVIDENCE_ITEM = 80;
+
+function parseSecondaryActivities(row: Record<string, unknown>): SecondaryActivity[] {
+  const raw = row.secondary_activities_json;
+  const json = (typeof raw === 'string' ? raw : null) as string | null;
+  const parsed = safeJsonParse<unknown>(json, []);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  return parsed
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null && !Array.isArray(item))
+    .map((item) => ({
+      displayIndex: Number(item.displayIndex ?? 0),
+      projectName: toStoredProjectName(String(item.projectName ?? 'その他')),
+      category: toStoredCategoryLabel(String(item.category ?? UNKNOWN_LABEL)),
+      taskLabel: String(item.taskLabel ?? ''),
+      stateSummary: String(item.stateSummary ?? ''),
+      evidence: Array.isArray(item.evidence) ? item.evidence.filter((e): e is string => typeof e === 'string') : [],
+    }))
+    .filter((item) => Number.isFinite(item.displayIndex));
+}
 
 type SqlValue = string | number | null;
 
@@ -90,6 +112,7 @@ function rowToCheckpoint(row: Record<string, unknown>): CheckpointRecord {
     status: row.status as CheckpointRecord['status'],
     appSummary: safeJsonParse<string[]>(row.app_summary_json as string | null, []),
     urlSummary: safeJsonParse<string[]>(row.url_summary_json as string | null, []),
+    secondaryActivities: parseSecondaryActivities(row),
   };
 }
 
@@ -224,6 +247,7 @@ export class AppDatabase {
     this.ensureColumn('snapshots', 'cursor_relative_x', 'REAL');
     this.ensureColumn('snapshots', 'cursor_relative_y', 'REAL');
     this.ensureColumn('checkpoints', 'is_distracted', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('checkpoints', 'secondary_activities_json', 'TEXT');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS category_rules (
@@ -468,14 +492,36 @@ export class AppDatabase {
       return `${item.slice(0, MAX_EVIDENCE_ITEM - 3)}…`;
     });
 
+    const secondaryPayload: SecondaryActivity[] = (record.secondaryActivities ?? []).map((act, actIndex) => {
+      const pn = truncateToMax(act.projectName, MAX_PROJECT_NAME, 'project_name');
+      const tl = truncateToMax(act.taskLabel, MAX_TASK_LABEL, 'task_label');
+      const ss = truncateToMax(act.stateSummary, MAX_STATE_SUMMARY, 'state_summary');
+      const ev = act.evidence.map((item, index) => {
+        if (item.length <= MAX_EVIDENCE_ITEM) {
+          return item;
+        }
+        console.warn('[insertCheckpoint] secondary evidence truncated:', { id: record.id, actIndex, index });
+        return `${item.slice(0, MAX_EVIDENCE_ITEM - 3)}…`;
+      });
+      return {
+        displayIndex: act.displayIndex,
+        projectName: pn,
+        category: act.category,
+        taskLabel: tl,
+        stateSummary: ss,
+        evidence: ev,
+      };
+    });
+    const secondaryJson = secondaryPayload.length ? JSON.stringify(secondaryPayload) : null;
+
     this.run(
       `
       INSERT INTO checkpoints (
         id, start_at, end_at, project_name, task_label, category, state_summary, evidence_json,
         continuity, confidence, source_snapshot_ids_json, llm_model, created_at, is_distracted, status,
-        app_summary_json, url_summary_json
+        app_summary_json, url_summary_json, secondary_activities_json
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       record.id,
       record.startAt,
@@ -494,6 +540,7 @@ export class AppDatabase {
       record.status,
       JSON.stringify(record.appSummary),
       JSON.stringify(record.urlSummary),
+      secondaryJson,
     );
   }
 
@@ -709,5 +756,37 @@ export class AppDatabase {
       .prepare("SELECT COUNT(*) AS total FROM snapshots WHERE checkpoint_id IS NULL AND status IN ('captured', 'analysis_failed')")
       .get() as Record<string, unknown>;
     return Number(row.total);
+  }
+
+  /**
+   * Deletes snapshots older than `daysOld` (by `captured_at`).
+   * Rows with a non-null `checkpoint_id` are kept as analysis evidence.
+   * `analysis_failed_terminal` rows with no checkpoint are removed when old.
+   */
+  cleanupOldSnapshots(daysOld: number): number {
+    const days = String(Math.max(0, Math.floor(daysOld)));
+    const result = this.db
+      .prepare(
+        `
+        DELETE FROM snapshots
+        WHERE captured_at < datetime('now', '-' || ? || ' days')
+          AND checkpoint_id IS NULL
+        `,
+      )
+      .run(days);
+    return Number(result.changes);
+  }
+
+  cleanupOldErrorLogs(daysOld: number): number {
+    const days = String(Math.max(0, Math.floor(daysOld)));
+    const result = this.db
+      .prepare(
+        `
+        DELETE FROM error_logs
+        WHERE created_at < datetime('now', '-' || ? || ' days')
+        `,
+      )
+      .run(days);
+    return Number(result.changes);
   }
 }

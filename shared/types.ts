@@ -4,6 +4,15 @@ export type WorkCategory = string;
 
 export type Continuity = 'continue' | 'switch' | 'unclear';
 
+export interface SecondaryActivity {
+  displayIndex: number;
+  projectName: string;
+  category: WorkCategory;
+  taskLabel: string;
+  stateSummary: string;
+  evidence: string[];
+}
+
 export type SnapshotStatus =
   | 'captured'
   | 'processed'
@@ -61,6 +70,7 @@ export interface CheckpointRecord {
   status: 'completed' | 'failed';
   appSummary: string[];
   urlSummary: string[];
+  secondaryActivities: SecondaryActivity[];
 }
 
 export interface WorkUnitRecord {
