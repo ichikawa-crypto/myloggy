@@ -158,9 +158,13 @@ async function readImagesBase64(paths: string[]): Promise<string[]> {
     try {
       await fs.access(filePath);
       images.push((await fs.readFile(filePath)).toString('base64'));
-    } catch {
-      throw new Error(`Snapshot image missing or unreadable: ${filePath}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`myloggy: image skipped (missing/unreadable): ${filePath} - ${message}`);
     }
+  }
+  if (images.length === 0 && paths.length > 0) {
+    throw new Error(`All snapshot images missing or unreadable (window size=${paths.length})`);
   }
   return images;
 }
