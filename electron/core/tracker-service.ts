@@ -50,6 +50,50 @@ function normalizeSettings(settings: AppSettings): AppSettings {
   };
 }
 
+/** Builds error_logs.detail for analyze failures (fetch/network diagnostics). */
+function formatAnalysisErrorDetail(err: Error): string {
+  const lines: string[] = [];
+  lines.push(`${err.name}: ${err.message}`);
+
+  const topCode = (err as { code?: unknown }).code;
+  if (topCode !== undefined && topCode !== null && String(topCode) !== '') {
+    lines.push(`code: ${String(topCode)}`);
+  }
+
+  const rawCause = (err as { cause?: unknown }).cause;
+  if (rawCause !== undefined && rawCause !== null) {
+    if (rawCause instanceof Error) {
+      const c = rawCause;
+      const cCode = (c as { code?: unknown }).code;
+      const cErrno = (c as { errno?: unknown }).errno;
+      const cSyscall = (c as { syscall?: unknown }).syscall;
+      const codeBracket =
+        cCode !== undefined && cCode !== null && String(cCode) !== '' ? ` [${String(cCode)}]` : '';
+      lines.push(`cause: ${c.name}${codeBracket}: ${c.message}`);
+      if (cCode !== undefined && cCode !== null && String(cCode) !== '') {
+        lines.push(`  cause.code: ${String(cCode)}`);
+      }
+      if (cErrno !== undefined && cErrno !== null) {
+        lines.push(`  cause.errno: ${String(cErrno)}`);
+      }
+      if (cSyscall !== undefined && cSyscall !== null && String(cSyscall) !== '') {
+        lines.push(`  cause.syscall: ${String(cSyscall)}`);
+      }
+      lines.push(`  cause.name: ${c.name}`);
+    } else {
+      lines.push(`cause: ${String(rawCause)}`);
+    }
+  }
+
+  const stack = err.stack;
+  if (stack) {
+    lines.push('---');
+    lines.push(stack);
+  }
+
+  return lines.join('\n');
+}
+
 export class TrackerService {
   private readonly db: AppDatabase;
   private readonly tempDir: string;
@@ -430,7 +474,7 @@ export class TrackerService {
         } catch (error) {
           const err = error instanceof Error ? error : new Error('Failed to analyze snapshot window');
           const message = err.message;
-          const stack = err.stack ?? null;
+          const detail = formatAnalysisErrorDetail(err);
           let kind = 'analysis';
           if (err.name === 'AbortError' || message.includes('aborted')) {
             kind = 'analysis:aborted';
@@ -445,7 +489,7 @@ export class TrackerService {
           }
           this.lastError = message;
           this.db.incrementAnalysisAttempts(windowSnapshots.map((snapshot) => snapshot.id));
-          this.db.insertError(kind, message, stack);
+          this.db.insertError(kind, message, detail);
         }
       }
     } finally {
