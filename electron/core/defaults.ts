@@ -10,6 +10,18 @@ export const CAPTURE_JPEG_SIPS_QUALITY = 75;
 /** Disable in-place downsample to preserve OCR/UI legibility. Set to true to re-enable. */
 export const CAPTURE_JPEG_DOWNSAMPLE_ENABLED = false;
 
+/** Rows in `snapshots` older than this (days, by `captured_at`) are deleted when not linked to a checkpoint. */
+export const SNAPSHOT_TTL_DAYS = 30;
+
+/** Rows in `error_logs` older than this (`created_at`) are deleted. */
+export const ERROR_LOG_TTL_DAYS = 14;
+
+/** `temp-snaps/*.jpg` with mtime older than this many days are deleted on cleanup. */
+export const TEMP_SNAPS_TTL_DAYS = 7;
+
+/** How often `TrackerService` runs DB + temp-snaps cleanup (hours). */
+export const CLEANUP_INTERVAL_HOURS = 24;
+
 export const DEFAULT_SETTINGS: AppSettings = {
   isTracking: true,
   captureIntervalMinutes: 1,

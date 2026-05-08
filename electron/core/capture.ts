@@ -147,3 +147,33 @@ export async function deleteScreenshots(snapshots: SnapshotRecord[]): Promise<vo
       }),
   );
 }
+
+/** Removes `.jpg` files under `tempDir` whose mtime is at least `daysOld` full days in the past. */
+export async function cleanupOrphanTempSnaps(tempDir: string, daysOld: number): Promise<number> {
+  const safeDays = Math.max(0, daysOld);
+  const cutoffMs = Date.now() - safeDays * 24 * 60 * 60 * 1000;
+  let removed = 0;
+  try {
+    const entries = await fs.readdir(tempDir, { withFileTypes: true });
+    for (const ent of entries) {
+      if (!ent.isFile() || !ent.name.toLowerCase().endsWith('.jpg')) {
+        continue;
+      }
+      const fullPath = path.join(tempDir, ent.name);
+      try {
+        const st = await fs.stat(fullPath);
+        if (st.mtimeMs < cutoffMs) {
+          await fs.unlink(fullPath);
+          removed += 1;
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[myloggy:cleanup] temp-snap skip ${fullPath}: ${message}`);
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[myloggy:cleanup] temp-snaps directory: ${message}`);
+  }
+  return removed;
+}
